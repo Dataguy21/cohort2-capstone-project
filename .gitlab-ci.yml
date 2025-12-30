@@ -1,0 +1,101 @@
+stages:
+  - test
+  - build
+  - push
+  - deploy
+
+# ----------------------------------------
+# 1️⃣ TEST STAGE
+# ----------------------------------------
+test_app:
+  stage: test
+  image: python:3.11
+  script:
+    - pip install --no-cache-dir -r requirements.txt
+    - export PYTHONPATH=$PYTHONPATH:$(pwd)
+    - pytest -v --maxfail=1 --disable-warnings --cov=src
+  artifacts:
+    when: always
+    paths:
+      - .pytest_cache/
+      - tests/
+
+# ----------------------------------------
+# 2️⃣ BUILD STAGE
+# ----------------------------------------
+build_docker_image:
+  stage: build
+  image: docker:25.0.3
+  services:
+    - name: docker:dind
+      command: ["--tls=false", "--host=tcp://0.0.0.0:2375"]
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+  script:
+    - docker build -t "$CI_REGISTRY_IMAGE:latest" .
+  tags:
+    - docker
+  only:
+    - main
+
+# ----------------------------------------
+# 3️⃣ PUSH TO GITLAB REGISTRY
+# ----------------------------------------
+push_to_registry:
+  stage: push
+  image: docker:25.0.3
+  services:
+    - name: docker:dind
+      command: ["--tls=false", "--host=tcp://0.0.0.0:2375"]
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+  script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" "$CI_REGISTRY" --password-stdin
+    - docker push "$CI_REGISTRY_IMAGE:latest"
+  tags:
+    - docker
+  only:
+    - main
+
+# ----------------------------------------
+# 4️⃣ DEPLOY TO AZURE
+# ----------------------------------------
+deploy_to_azure:
+  stage: deploy
+  image: mcr.microsoft.com/azure-cli:latest
+  script:
+    # Login to Azure
+    - az login --service-principal -u "$AZURE_CLIENT_ID" -p "$AZURE_CLIENT_SECRET" --tenant "$AZURE_TENANT_ID"
+    - az account set --subscription "$AZURE_SUBSCRIPTION_ID"
+
+    # Login to Azure ACR
+    - az acr login --name "$ACR_USERNAME"
+
+    # Tag and push Docker image to Azure ACR
+    - docker tag "$CI_REGISTRY_IMAGE:latest" "$ACR_REGISTRY/capstone:latest"
+    - docker push "$ACR_REGISTRY/capstone:latest"
+
+    # Deploy to Azure Web App
+    - az webapp config container set \
+        --name "$AZURE_APP_NAME" \
+        --resource-group "$AZURE_RESOURCE_GROUP" \
+        --docker-custom-image-name "$ACR_REGISTRY/capstone:latest" \
+        --docker-registry-server-url "https://$ACR_REGISTRY" \
+        --docker-registry-server-user "$ACR_USERNAME" \
+        --docker-registry-server-password "$ACR_PASSWORD"
+    - az webapp restart --name "$AZURE_APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP"
+  tags:
+    - docker
+  only:
+    - main
+
+# ----------------------------------------
+# 5️⃣ SUCCESS MESSAGE
+# ----------------------------------------
+success_message:
+  stage: deploy
+  script:
+    - echo "🎉 CI/CD pipeline completed successfully — image built, pushed, and deployed to Azure!"
+  when: always
